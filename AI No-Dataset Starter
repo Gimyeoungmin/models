@@ -1,0 +1,468 @@
+# AI No-Dataset Starter Kit (Multi-Strategy)
+# ------------------------------------------------------------
+# This repo-style code bundle shows 6 strategies to build/use AI
+# when you do NOT have (much) labeled data:
+#  1. Pretrained model usage
+#  2. Synthetic data generation
+#  3. Automated data collection (web/API crawl)
+#  4. Zero-shot / Few-shot prompting
+#  5. Transfer learning (fine-tune w/ tiny data)
+#  6. Human-in-the-loop / Self-training / RLHF-lite simulation
+#
+# Each section below can be saved as its own .py file. Minimal, runnable
+# examples with stubbed or very small demo data so you can start immediately.
+#
+# Dependencies (put into requirements.txt):
+#   torch
+#   torchvision
+#   transformers
+#   datasets
+#   scikit-learn
+#   numpy
+#   pandas
+#   matplotlib
+#   beautifulsoup4
+#   requests
+#   tqdm
+#   accelerate (optional)
+#   sentencepiece (for some models)
+#
+# Usage: Copy each block to a file OR programmatically split.
+# A helper script `make_project_structure.py` at bottom auto-writes files.
+# ------------------------------------------------------------
+
+import os
+import sys
+
+
+# ---------------------------------------------------------------------------
+# config.py (shared)
+# ---------------------------------------------------------------------------
+CONFIG_PY = r'''"""Global config utilities."""
+import os
+
+# Load keys from environment; DO NOT hardcode secrets.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN", "")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+'''
+
+
+# ---------------------------------------------------------------------------
+# utils/logging_utils.py
+# ---------------------------------------------------------------------------
+LOGGING_UTILS_PY = r'''import logging, sys
+
+def setup_logging(name: str = "ai_no_dataset"):
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        h = logging.StreamHandler(sys.stdout)
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        h.setFormatter(fmt)
+        logger.addHandler(h)
+    return logger
+'''
+
+
+# ---------------------------------------------------------------------------
+# 01_pretrained_nlp.py  (Strategy 1: Use pretrained model directly)
+# ---------------------------------------------------------------------------
+PRETRAINED_NLP_PY = r'''"""Demo: use a pretrained QA pipeline w/out custom dataset."""
+from transformers import pipeline
+from utils.logging_utils import setup_logging
+
+log = setup_logging("pretrained")
+
+# Load small model for speed; change to bigger if GPU.
+qa = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
+
+context = "France is a country in Europe. Its capital is Paris. It shares borders with Spain and Germany."
+question = "What is the capital of France?"
+
+ans = qa({"question": question, "context": context})
+log.info(f"Q: {question}\nA: {ans['answer']} (score={ans['score']:.3f})")
+
+# Try interactive loop
+if __name__ == "__main__":
+    while True:
+        try:
+            q = input("Ask (blank to quit): ").strip()
+        except EOFError:
+            break
+        if not q:
+            break
+        out = qa({"question": q, "context": context})
+        print(out)
+'''
+
+
+# ---------------------------------------------------------------------------
+# 02_synthetic_textgen.py  (Strategy 2: Generate synthetic labeled data)
+# ---------------------------------------------------------------------------
+SYNTHETIC_TEXTGEN_PY = r'''"""Generate pseudo labeled sentiment data using an LLM + rule heuristics."""
+import os, json, random
+from typing import List, Dict
+from utils.logging_utils import setup_logging
+
+# If you have OpenAI access, you can call it; fallback to templates.
+# (We keep this offline-friendly by using templates when API key missing.)
+
+log = setup_logging("synthetic")
+
+POS_TEMPLATES = [
+    "I absolutely loved this product!", "Fantastic experience, will buy again.",
+    "Superb quality and great support.", "Better than expected!" ]
+NEG_TEMPLATES = [
+    "Terrible, broke on day one.", "Very disappointing and overpriced.",
+    "Would not recommend to anyone.", "Poor quality and slow delivery." ]
+
+NEU_TEMPLATES = ["It's okay.", "Average.", "Nothing special.", "Fine for the price."]
+
+LABEL_MAP = {"pos":1, "neg":0, "neu":2}
+
+def synth_samples(n_per_class=50):
+    data = []
+    for _ in range(n_per_class):
+        data.append({"text": random.choice(POS_TEMPLATES), "label": LABEL_MAP['pos']})
+        data.append({"text": random.choice(NEG_TEMPLATES), "label": LABEL_MAP['neg']})
+        data.append({"text": random.choice(NEU_TEMPLATES), "label": LABEL_MAP['neu']})
+    random.shuffle(data)
+    return data
+
+if __name__ == "__main__":
+    ds = synth_samples(100)
+    out_path = os.path.join(os.path.dirname(__file__), "data", "synthetic_sentiment.jsonl")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, 'w', encoding='utf-8') as f:
+        for row in ds:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    log.info(f"Wrote {len(ds)} synthetic rows -> {out_path}")
+'''
+
+
+# ---------------------------------------------------------------------------
+# 03_web_crawl_collect.py  (Strategy 3: Simple crawl -> unlabeled corpus)
+# ---------------------------------------------------------------------------
+WEB_CRAWL_COLLECT_PY = r'''"""Simple demo crawler that collects titles from a page (Hacker News)."""
+import os, requests
+from bs4 import BeautifulSoup
+from utils.logging_utils import setup_logging
+
+log = setup_logging("crawl")
+URL = "https://news.ycombinator.com/"
+
+html = requests.get(URL, timeout=10).text
+soup = BeautifulSoup(html, "html.parser")
+
+rows = [a.get_text(strip=True) for a in soup.select("a.storylink, span.titleline > a")]
+
+out_path = os.path.join(os.path.dirname(__file__), "data", "hn_titles.txt")
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+with open(out_path, 'w', encoding='utf-8') as f:
+    for t in rows:
+        f.write(t + "\n")
+log.info(f"Saved {len(rows)} titles -> {out_path}")
+'''
+
+
+# ---------------------------------------------------------------------------
+# 04_zero_fewshot_prompt.py  (Strategy 4: Zero-/Few-shot with LLM APIs)
+# ---------------------------------------------------------------------------
+ZERO_FEWSHOT_PY = r'''"""Demonstrate zero-shot & few-shot classification w/ OpenAI or local LLM."""
+import os, json
+from utils.logging_utils import setup_logging
+
+log = setup_logging("zerofew")
+
+# For demonstration we implement a *fake* LLM classifier using keyword rules
+# when OPENAI_API_KEY is not set. This keeps script runnable offline.
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+FEW_SHOT_EXAMPLES = [
+    {"text": "I love this!", "label": "Positive"},
+    {"text": "This is terrible.", "label": "Negative"},
+]
+
+KEYWORDS_POS = {"love", "great", "good", "amazing", "happy"}
+KEYWORDS_NEG = {"bad", "terrible", "hate", "awful", "sad"}
+
+def rule_classify(text: str) -> str:
+    low = text.lower()
+    if any(k in low for k in KEYWORDS_POS):
+        return "Positive"
+    if any(k in low for k in KEYWORDS_NEG):
+        return "Negative"
+    return "Neutral"
+
+
+def classify_texts(texts):
+    # If you have API, you'd build a prompt with FEW_SHOT_EXAMPLES.
+    # Here we use rule fallback.
+    results = []
+    for tx in texts:
+        results.append({"text": tx, "prediction": rule_classify(tx)})
+    return results
+
+if __name__ == "__main__":
+    samples = ["I hate the lag", "Pretty good overall", "meh"]
+    preds = classify_texts(samples)
+    log.info(json.dumps(preds, ensure_ascii=False, indent=2))
+'''
+
+
+# ---------------------------------------------------------------------------
+# 05_transfer_learning_vision.py  (Strategy 5: Fine-tune tiny classifier)
+# ---------------------------------------------------------------------------
+TRANSFER_LEARNING_VISION_PY = r'''"""Transfer learning demo: fine-tune a pretrained CNN on a tiny custom dataset."""
+import os, torch
+from torch import nn, optim
+from torchvision import datasets, transforms, models
+from utils.logging_utils import setup_logging
+
+log = setup_logging("transfer")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Use torchvision's FakeData to simulate having a *tiny* custom dataset.
+transform = transforms.Compose([
+    transforms.Resize((224,224)),
+    transforms.ToTensor(),
+])
+train_ds = datasets.FakeData(size=64, image_size=(3,224,224), num_classes=2, transform=transform)
+train_loader = torch.utils.data.DataLoader(train_ds, batch_size=8, shuffle=True)
+
+# Load pretrained backbone
+model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+for p in model.parameters():
+    p.requires_grad = False  # freeze backbone
+
+# Replace final head
+num_feats = model.fc.in_features
+model.fc = nn.Linear(num_feats, 2)
+model.to(device)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.fc.parameters(), lr=1e-3)
+
+model.train()
+for epoch in range(3):
+    total, correct, loss_sum = 0, 0, 0.0
+    for x, y in train_loader:
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        out = model(x)
+        loss = criterion(out, y)
+        loss.backward()
+        optimizer.step()
+        loss_sum += loss.item()*x.size(0)
+        pred = out.argmax(1)
+        correct += (pred==y).sum().item()
+        total += y.size(0)
+    log.info(f"Epoch {epoch+1}: loss={loss_sum/total:.4f} acc={correct/total:.3f}")
+
+# Save weights
+out_path = os.path.join(os.path.dirname(__file__), "data", "transfer_resnet18.pt")
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+torch.save(model.state_dict(), out_path)
+log.info(f"Saved fine-tuned head -> {out_path}")
+'''
+
+
+# ---------------------------------------------------------------------------
+# 06_human_in_loop_rlhf_sim.py  (Strategy 6: Human feedback & self-training loop)
+# ---------------------------------------------------------------------------
+HUMAN_LOOP_PY = r'''"""Simulate human-in-the-loop: model proposes labels, user confirms -> retrain."""
+import os, json, random
+import numpy as np
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.linear_model import LogisticRegression
+from utils.logging_utils import setup_logging
+
+log = setup_logging("humanloop")
+
+# Seed small labeled set
+L_LABELED = [
+    ("I love it", 1),
+    ("Hate this", 0),
+]
+
+# Unlabeled pool
+UNLABELED = ["Great value", "Awful performance", "So-so", "Good battery", "Bad sound"]
+
+vec = CountVectorizer()
+X0 = vec.fit_transform([t for t,_ in L_LABELED])
+y0 = np.array([y for _,y in L_LABELED])
+
+clf = LogisticRegression(max_iter=200).fit(X0, y0)
+
+confirmed = []
+for tx in UNLABELED:
+    prob = clf.predict_proba(vec.transform([tx]))[0]
+    pred = int(prob[1] > 0.5)
+    conf = prob.max()
+    # "Human" step: auto-accept if confident >0.8 else ask user.
+    if conf > 0.8:
+        label = pred
+        source = "auto"
+    else:
+        # Ask user (simulated w/ random ground truth) - replace w/ input() in real use.
+        # ground truth simulation: positive if word 'good' or 'great' etc.
+        gt = 1 if any(k in tx.lower() for k in ["good","great","love","value","battery"]) else 0
+        label = gt
+        source = "human"
+    confirmed.append((tx, label, source))
+    log.info(f"Added {tx!r} label={label} via {source} (conf={conf:.2f})")
+
+# Retrain with added labels
+train_texts = [t for t,_ in L_LABELED] + [t for t,_,_ in confirmed]
+train_labels = [y for _,y in L_LABELED] + [y for _,y,_ in confirmed]
+X = vec.fit_transform(train_texts)
+y = np.array(train_labels)
+clf = LogisticRegression(max_iter=200).fit(X, y)
+log.info("Retrained with human feedback.")
+
+# Save dataset we built
+out_path = os.path.join(os.path.dirname(__file__), "data", "human_loop_dataset.jsonl")
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+with open(out_path, 'w', encoding='utf-8') as f:
+    for (t,l,src) in confirmed:
+        f.write(json.dumps({"text":t, "label":l, "source":src}, ensure_ascii=False) + "\n")
+log.info(f"Wrote augmented dataset -> {out_path}")
+'''
+
+
+# ---------------------------------------------------------------------------
+# make_project_structure.py  (helper to write all files to disk)
+# ---------------------------------------------------------------------------
+MAKE_PROJECT_STRUCTURE_PY = r'''"""Create project directory tree & write demo files."""
+import os, io
+
+# Import the raw strings embedded in parent script if run inline
+from pathlib import Path
+import importlib
+
+THIS_DIR = Path(__file__).parent
+ROOT = THIS_DIR  # assume run from root
+
+FILES = {
+    "config.py": CONFIG_PY,
+    "utils/logging_utils.py": LOGGING_UTILS_PY,
+    "01_pretrained_nlp.py": PRETRAINED_NLP_PY,
+    "02_synthetic_textgen.py": SYNTHETIC_TEXTGEN_PY,
+    "03_web_crawl_collect.py": WEB_CRAWL_COLLECT_PY,
+    "04_zero_fewshot_prompt.py": ZERO_FEWSHOT_PY,
+    "05_transfer_learning_vision.py": TRANSFER_LEARNING_VISION_PY,
+    "06_human_in_loop_rlhf_sim.py": HUMAN_LOOP_PY,
+}
+
+
+def ensure_parent(p: Path):
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+
+def write_files():
+    for rel, txt in FILES.items():
+        p = ROOT / rel
+        ensure_parent(p)
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write(txt)
+    print(f"Wrote {len(FILES)} files under {ROOT}")
+
+if __name__ == "__main__":
+    write_files()
+'''
+
+
+# ---------------------------------------------------------------------------
+# requirements.txt content
+# ---------------------------------------------------------------------------
+REQUIREMENTS_TXT = r'''torch
+torchvision
+transformers
+datasets
+scikit-learn
+numpy
+pandas
+matplotlib
+beautifulsoup4
+requests
+tqdm
+accelerate
+sentencepiece
+''' 
+
+
+# ---------------------------------------------------------------------------
+# README.md content (short)
+# ---------------------------------------------------------------------------
+README_MD = r'''# AI No-Dataset Starter Kit
+
+This starter shows 6 practical strategies to build useful AI systems when you lack labeled data:
+
+1. **Pretrained model** – use knowledge baked into large public models.
+2. **Synthetic data** – generate labeled examples programmatically or via LLMs.
+3. **Automated data collection** – scrape / API harvest unlabeled corpora.
+4. **Zero-/Few-shot prompting** – leverage LLM generalization with minimal examples.
+5. **Transfer learning** – adapt pretrained backbones w/ tiny custom data.
+6. **Human-in-the-loop / Self-training** – iteratively label + retrain.
+
+See the numbered Python scripts for minimal runnable demos. Export env vars before running:
+
+```bash
+export OPENAI_API_KEY=...   # if you want live LLMs
+export HUGGINGFACE_TOKEN=...  # optional
+```
+
+Run examples:
+```bash
+python 01_pretrained_nlp.py
+python 02_synthetic_textgen.py
+python 03_web_crawl_collect.py
+python 04_zero_fewshot_prompt.py
+python 05_transfer_learning_vision.py
+python 06_human_in_loop_rlhf_sim.py
+```
+
+---
+**License:** MIT (modify freely for learning & projects)
+'''
+
+
+# ---------------------------------------------------------------------------
+# Auto-writer utility (executed when this top-level script run directly)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import pathlib, zipfile, tempfile
+    root = pathlib.Path.cwd() / "ai_no_dataset_starter"
+    root.mkdir(exist_ok=True)
+
+    # Write each file
+    for rel, txt in {
+        "config.py": CONFIG_PY,
+        "utils/logging_utils.py": LOGGING_UTILS_PY,
+        "01_pretrained_nlp.py": PRETRAINED_NLP_PY,
+        "02_synthetic_textgen.py": SYNTHETIC_TEXTGEN_PY,
+        "03_web_crawl_collect.py": WEB_CRAWL_COLLECT_PY,
+        "04_zero_fewshot_prompt.py": ZERO_FEWSHOT_PY,
+        "05_transfer_learning_vision.py": TRANSFER_LEARNING_VISION_PY,
+        "06_human_in_loop_rlhf_sim.py": HUMAN_LOOP_PY,
+        "requirements.txt": REQUIREMENTS_TXT,
+        "README.md": README_MD,
+    }.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write(txt)
+
+    # Make empty data dir
+    (root / "data").mkdir(exist_ok=True)
+
+    # Zip it
+    zip_path = root.with_suffix('.zip')
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+        for p in root.rglob('*'):
+            z.write(p, p.relative_to(root.parent))
+    print(f"Project written to: {root}\nZip archive: {zip_path}")
